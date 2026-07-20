@@ -44,39 +44,66 @@ enum NotionClient {
         return isDup
     }
 
+    /// Exact title match first; if that misses, fuzzy: folder names drift from
+    /// Notion titles (folder "Graceway 50th Celebration" vs project
+    /// "50th Celebration"), so accept the project whose title is contained in
+    /// the extracted name — or vice versa — preferring the longest title.
     static func findProjectPageId(projectName: String, config: Config) -> String? {
-        guard let url = URL(string: "https://api.notion.com/v1/databases/\(config.projectsDB)/query") else {
-            return nil
+        if let exact = queryProject(filter: ["property": "Name", "title": ["equals": projectName]],
+                                    config: config).first?.id {
+            return exact
         }
-        let filterDict: [String: Any] = [
-            "filter": [
-                "property": "Name",
-                "title": [
-                    "equals": projectName
-                ]
-            ]
-        ]
-        guard let bodyData = try? JSONSerialization.data(withJSONObject: filterDict) else { return nil }
-        let request = makeRequest(url: url, method: "POST", token: config.notionToken, body: bodyData)
-        
-        let semaphore = DispatchSemaphore(value: 0)
-        var projectID: String? = nil
-        
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            defer { semaphore.signal() }
-            guard let data, let httpResp = response as? HTTPURLResponse, (200...299).contains(httpResp.statusCode) else {
-                return
+        // Fuzzy pass: list projects and score containment either direction.
+        let all = queryProject(filter: nil, config: config)
+        let wanted = projectName.lowercased()
+        let candidates = all.filter { p in
+            let t = p.title.lowercased()
+            return !t.isEmpty && (wanted.contains(t) || t.contains(wanted))
+        }
+        if let best = candidates.max(by: { $0.title.count < $1.title.count }) {
+            Log.write("Project fuzzy-matched: '\(projectName)' -> '\(best.title)'")
+            return best.id
+        }
+        Log.write("No Notion project matched '\(projectName)' — page will have no relation")
+        return nil
+    }
+
+    private static func queryProject(filter: [String: Any]?, config: Config)
+        -> [(id: String, title: String)] {
+        guard let url = URL(string: "https://api.notion.com/v1/databases/\(config.projectsDB)/query") else {
+            return []
+        }
+        var out: [(String, String)] = []
+        var cursor: String? = nil
+        for _ in 0..<10 {   // up to 1000 projects
+            var body: [String: Any] = ["page_size": 100]
+            if let f = filter { body["filter"] = f }
+            if let c = cursor { body["start_cursor"] = c }
+            guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else { break }
+            let request = makeRequest(url: url, method: "POST", token: config.notionToken, body: bodyData)
+
+            let semaphore = DispatchSemaphore(value: 0)
+            var page: [String: Any]? = nil
+            URLSession.shared.dataTask(with: request) { data, response, _ in
+                defer { semaphore.signal() }
+                guard let data, let httpResp = response as? HTTPURLResponse,
+                      (200...299).contains(httpResp.statusCode) else { return }
+                page = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            }.resume()
+            _ = semaphore.wait(timeout: .now() + 15)
+
+            guard let json = page, let results = json["results"] as? [[String: Any]] else { break }
+            for r in results {
+                guard let id = r["id"] as? String else { continue }
+                let title = (((r["properties"] as? [String: Any])?["Name"] as? [String: Any])?["title"]
+                    as? [[String: Any]])?.compactMap { $0["plain_text"] as? String }.joined() ?? ""
+                out.append((id, title))
             }
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let results = json["results"] as? [[String: Any]],
-               let first = results.first,
-               let id = first["id"] as? String {
-                projectID = id
-            }
-        }.resume()
-        
-        _ = semaphore.wait(timeout: .now() + 15)
-        return projectID
+            if json["has_more"] as? Bool == true, let next = json["next_cursor"] as? String {
+                cursor = next
+            } else { break }
+        }
+        return out
     }
 
     static func createTranscriptPage(clipName: String, paragraphs: [String], projectPageId: String?, config: Config) -> Bool {
