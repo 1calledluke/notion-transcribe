@@ -6,6 +6,8 @@ struct Config: Codable {
     var projectsDB: String = "232714d3-333f-80c8-88fd-d1eefeed3b3f"
     var whisperModel: String = NSHomeDirectory() + "/Models/ggml-large-v3-turbo.bin"
     var lastFolder: String = ""
+    /// Clips shorter than this many seconds are skipped (b-roll gate); 0 = off
+    var minClipSeconds: Double = 60
 
     private static var fileURL: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory,

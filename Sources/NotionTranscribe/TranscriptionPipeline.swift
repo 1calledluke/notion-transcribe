@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 
 final class TranscriptionPipeline {
     func run(folderURL: URL, onStatusUpdate: @escaping (String) -> Void) async {
@@ -56,6 +57,17 @@ final class TranscriptionPipeline {
             onStatusUpdate(statusText)
             Log.write("Processing clip \(index + 1)/\(totalClips): \(item.clipName)")
             
+            // Duration gate: interviews are long takes, b-roll is short bursts.
+            // Skipping sub-minute clips keeps whisper off 100 clips of room tone.
+            if config.minClipSeconds > 0 {
+                let dur = Self.clipDuration(item.targetURL)
+                if let dur, dur < config.minClipSeconds {
+                    Log.write("Skipping \(item.clipName): \(Int(dur))s < \(Int(config.minClipSeconds))s minimum (b-roll gate)")
+                    skippedCount += 1
+                    continue
+                }
+            }
+
             let docTitle = "\(item.clipName) — Transcript"
             if NotionClient.isDuplicate(title: docTitle, config: config) {
                 Log.write("Skipping \(item.clipName): already transcribed in Notion (\(docTitle))")
@@ -102,5 +114,21 @@ final class TranscriptionPipeline {
         let summary = "Transcribed \(transcribedCount) clips → Notion (\(skippedCount) skipped)"
         Log.write("Job finished: \(summary)")
         Notifier.notify(body: summary)
+    }
+
+    /// Clip length in seconds via AVFoundation; nil if unreadable (then we
+    /// don't gate — better to transcribe than silently drop).
+    static func clipDuration(_ url: URL) -> Double? {
+        let asset = AVURLAsset(url: url)
+        let sema = DispatchSemaphore(value: 0)
+        var seconds: Double? = nil
+        Task {
+            if let d = try? await asset.load(.duration) {
+                seconds = CMTimeGetSeconds(d)
+            }
+            sema.signal()
+        }
+        sema.wait()
+        return (seconds?.isFinite == true) ? seconds : nil
     }
 }
