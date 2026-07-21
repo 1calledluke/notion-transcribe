@@ -30,6 +30,10 @@ final class TranscriptionPipeline {
             return
         }
         
+        // Fallback resolution from the chosen folder; each clip re-resolves
+        // from its OWN path below, so picking a whole client folder (spanning
+        // several projects) still links every transcript correctly.
+        var projectCache: [String: String?] = [:]
         var projectPageId: String? = nil
         if let projectName = ProjectResolver.extractProjectName(fromFolderPath: folderURL.path) {
             Log.write("Extracted project name '\(projectName)' from path: \(folderURL.path)")
@@ -101,7 +105,23 @@ final class TranscriptionPipeline {
                 continue
             }
             
-            let postOK = NotionClient.createTranscriptPage(clipName: item.clipName, paragraphs: paragraphs, projectPageId: projectPageId, config: config)
+            // Resolve the project from the clip's own location (cached per
+            // project name) — falls back to the job-level resolution.
+            var clipProjectId = projectPageId
+            let clipDir = item.targetURL.deletingLastPathComponent().path
+            if let name = ProjectResolver.extractProjectName(fromFolderPath: clipDir) {
+                if let cached = projectCache[name] {
+                    clipProjectId = cached ?? projectPageId
+                } else {
+                    let resolved = NotionClient.findProjectPageId(projectName: name, config: config)
+                    projectCache[name] = resolved
+                    if let resolved { clipProjectId = resolved }
+                    Log.write(resolved != nil
+                        ? "Clip project: '\(name)' resolved for \(item.clipName)"
+                        : "Clip project: '\(name)' NOT found — using job-level fallback for \(item.clipName)")
+                }
+            }
+            let postOK = NotionClient.createTranscriptPage(clipName: item.clipName, paragraphs: paragraphs, projectPageId: clipProjectId, config: config)
             if postOK {
                 Log.write("Successfully posted transcript for \(item.clipName) to Notion.")
                 transcribedCount += 1
