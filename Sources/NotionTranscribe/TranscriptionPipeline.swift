@@ -53,6 +53,37 @@ final class TranscriptionPipeline {
             try? FileManager.default.removeItem(at: tempDir)
         }
         
+        var jobState = JobState(folderPath: folderURL.path, startedAt: Date(),
+                                totalClips: totalClips, doneClips: [], finished: false)
+        jobState.save()
+
+        // One consolidated doc per project (SouthCreek format), created lazily
+        // and cached; the folder's display name covers the no-project case.
+        var docCache: [String: NotionDoc.Handle] = [:]
+        func docFor(clipDir: String) -> NotionDoc.Handle? {
+            let name = ProjectResolver.extractProjectName(fromFolderPath: clipDir)
+            var base = name ?? folderURL.lastPathComponent
+            var pid: String? = nil
+            if let name {
+                if let cached = projectCache[name] { pid = cached }
+                else {
+                    pid = NotionClient.findProjectPageId(projectName: name, config: config)
+                    projectCache[name] = pid
+                }
+            } else {
+                pid = projectPageId
+                if pid == nil {
+                    // strip a leading yy.mm_ if the folder itself is a project dir
+                    base = base.replacingOccurrences(of: "_", with: " ")
+                }
+            }
+            if let hit = docCache[base] { return hit }
+            let handle = NotionDoc.findOrCreate(baseName: base, projectPageId: pid,
+                                                sourcePath: folderURL.path, config: config)
+            if let handle { docCache[base] = handle }
+            return handle
+        }
+
         var transcribedCount = 0
         var skippedCount = scanResult.skippedBrawCount
         
@@ -63,8 +94,9 @@ final class TranscriptionPipeline {
             
             // Duration gate: interviews are long takes, b-roll is short bursts.
             // Skipping sub-minute clips keeps whisper off 100 clips of room tone.
+            let clipSeconds = Self.clipDuration(item.targetURL)
             if config.minClipSeconds > 0 {
-                let dur = Self.clipDuration(item.targetURL)
+                let dur = clipSeconds
                 if let dur, dur < config.minClipSeconds {
                     Log.write("Skipping \(item.clipName): \(Int(dur))s < \(Int(config.minClipSeconds))s minimum (b-roll gate)")
                     skippedCount += 1
@@ -72,9 +104,15 @@ final class TranscriptionPipeline {
                 }
             }
 
-            let docTitle = "\(item.clipName) — Transcript"
-            if NotionClient.isDuplicate(title: docTitle, config: config) {
-                Log.write("Skipping \(item.clipName): already transcribed in Notion (\(docTitle))")
+            let clipDirPath = item.targetURL.deletingLastPathComponent().path
+            guard var doc = docFor(clipDir: clipDirPath) else {
+                Log.write("Couldn't open/create the transcript doc for \(item.clipName). Skipping.")
+                skippedCount += 1
+                continue
+            }
+            let clipTitle = (item.clipName as NSString).deletingPathExtension
+            if doc.existingClips.contains(clipTitle) {
+                Log.write("Skipping \(item.clipName): already in the transcript doc")
                 skippedCount += 1
                 continue
             }
@@ -105,25 +143,18 @@ final class TranscriptionPipeline {
                 continue
             }
             
-            // Resolve the project from the clip's own location (cached per
-            // project name) — falls back to the job-level resolution.
-            var clipProjectId = projectPageId
-            let clipDir = item.targetURL.deletingLastPathComponent().path
-            if let name = ProjectResolver.extractProjectName(fromFolderPath: clipDir) {
-                if let cached = projectCache[name] {
-                    clipProjectId = cached ?? projectPageId
-                } else {
-                    let resolved = NotionClient.findProjectPageId(projectName: name, config: config)
-                    projectCache[name] = resolved
-                    if let resolved { clipProjectId = resolved }
-                    Log.write(resolved != nil
-                        ? "Clip project: '\(name)' resolved for \(item.clipName)"
-                        : "Clip project: '\(name)' NOT found — using job-level fallback for \(item.clipName)")
-                }
-            }
-            let postOK = NotionClient.createTranscriptPage(clipName: item.clipName, paragraphs: paragraphs, projectPageId: clipProjectId, config: config)
+            let postOK = NotionDoc.addClipPage(to: doc, clipTitle: clipTitle,
+                                               clipName: item.clipName,
+                                               paragraphs: paragraphs, config: config)
             if postOK {
-                Log.write("Successfully posted transcript for \(item.clipName) to Notion.")
+                let mins = clipSeconds.map { max(1, Int(($0 / 60).rounded())) } ?? 0
+                NotionDoc.addIndexRow(to: doc, clip: clipTitle, subject: "—",
+                                      length: mins > 0 ? "\(mins) min" : "—", config: config)
+                doc.existingClips.insert(clipTitle)
+                docCache = docCache.mapValues { $0.pageId == doc.pageId ? doc : $0 }
+                jobState.doneClips.append(item.clipName)
+                jobState.save()
+                Log.write("Added \(item.clipName) to transcript doc.")
                 transcribedCount += 1
             } else {
                 Log.write("Failed to post transcript for \(item.clipName) to Notion.")
@@ -131,6 +162,8 @@ final class TranscriptionPipeline {
             }
         }
         
+        jobState.finished = true
+        jobState.save()
         let summary = "Transcribed \(transcribedCount) clips → Notion (\(skippedCount) skipped)"
         Log.write("Job finished: \(summary)")
         Notifier.notify(body: summary)

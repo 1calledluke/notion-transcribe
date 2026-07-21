@@ -34,6 +34,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let transcribeItem = NSMenuItem(title: "Transcribe Folder…", action: #selector(selectFolderToTranscribe), keyEquivalent: "t")
         transcribeItem.target = self
         menu.addItem(transcribeItem)
+        let resumeItem = NSMenuItem(title: "Resume Last Job", action: #selector(resumeLastJob), keyEquivalent: "")
+        resumeItem.target = self
+        menu.addItem(resumeItem)
         
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
@@ -110,6 +113,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func updateStatus(_ text: String) {
         statusMenuItem.title = text
+    }
+
+    @objc private func resumeLastJob() {
+        guard let state = JobState.resumable() else {
+            let a = NSAlert()
+            a.messageText = "Nothing to resume"
+            a.informativeText = "The last transcription job finished (or its folder is gone)."
+            NSApp.activate(ignoringOtherApps: true)
+            a.runModal()
+            return
+        }
+        Log.write("Resuming job: \(state.folderPath) (\(state.doneClips.count)/\(state.totalClips) were done)")
+        startJob(folderURL: URL(fileURLWithPath: state.folderPath))
     }
 
     @objc private func openSettings() {
