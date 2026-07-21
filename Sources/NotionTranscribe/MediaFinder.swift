@@ -77,8 +77,11 @@ enum MediaFinder {
                     usedProxyURLs.insert(proxyURL)
                     Log.write("Using proxy \(proxyURL.lastPathComponent) for \(clipName)")
                 } else {
-                    skippedBrawCount += 1
-                    Log.write("Skipping \(clipName): no proxy found under Proxy/")
+                    // No proxy? Read audio straight out of the .braw via the
+                    // Blackmagic SDK (brawthumb --audio). AudioExtractor detects
+                    // the .braw target and handles it.
+                    rawItems.append(MediaItem(originalURL: file, targetURL: file, clipName: clipName))
+                    Log.write("No proxy for \(clipName) — will read audio from the .braw directly")
                 }
             }
         }

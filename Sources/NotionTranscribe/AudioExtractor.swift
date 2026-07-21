@@ -6,12 +6,51 @@ enum AudioExtractor {
     /// Video containers (Sony XAVC-S MP4s, MXF, etc.) go through AVFoundation —
     /// afconvert is an AUDIO-file tool and cannot open them at all. Pure audio
     /// files take the cheap afconvert path, with AVFoundation as the backstop.
+    /// BRAW has no system decoder: the Blackmagic SDK reads its audio directly.
     static func extractAudio(from inputURL: URL, to outputWavURL: URL) -> Bool {
+        let ext = inputURL.pathExtension.lowercased()
+        if ext == "braw" {
+            return extractFromBraw(from: inputURL, to: outputWavURL)
+        }
         let audioOnly: Set<String> = ["wav", "aif", "aiff", "mp3", "m4a", "flac", "caf"]
-        if audioOnly.contains(inputURL.pathExtension.lowercased()) {
+        if audioOnly.contains(ext) {
             if extractWithAfconvert(from: inputURL, to: outputWavURL) { return true }
         }
         return extractWithAVFoundation(from: inputURL, to: outputWavURL)
+    }
+
+    /// Bundled brawthumb --audio -> raw WAV, then afconvert down to 16k mono
+    /// (whisper's expected input). Tool ships in this app's Resources, or the
+    /// DIT Media Ingest app's, or the dev tree.
+    private static func extractFromBraw(from inputURL: URL, to outputWavURL: URL) -> Bool {
+        let candidates = [
+            Bundle.main.path(forResource: "brawthumb", ofType: nil),
+            "/Applications/DIT Media Ingest.app/Contents/Resources/brawthumb",
+            NSHomeDirectory() + "/dit-ingest-app/tools/brawthumb",
+        ].compactMap { $0 }
+        guard let tool = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            Log.write("BRAW audio skipped for \(inputURL.lastPathComponent): brawthumb tool not found")
+            return false
+        }
+
+        let rawWav = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + ".wav")
+        defer { try? FileManager.default.removeItem(at: rawWav) }
+
+        let extract = Process()
+        extract.executableURL = URL(fileURLWithPath: tool)
+        extract.arguments = ["--audio", inputURL.path, rawWav.path]
+        extract.standardOutput = Pipe()
+        extract.standardError = Pipe()
+        do { try extract.run() } catch { return false }
+        extract.waitUntilExit()
+        guard extract.terminationStatus == 0,
+              FileManager.default.fileExists(atPath: rawWav.path) else {
+            Log.write("BRAW audio extraction failed for \(inputURL.lastPathComponent)")
+            return false
+        }
+        // Downsample to whisper's 16k mono.
+        return extractWithAfconvert(from: rawWav, to: outputWavURL)
     }
 
     private static func extractWithAfconvert(from inputURL: URL, to outputWavURL: URL) -> Bool {

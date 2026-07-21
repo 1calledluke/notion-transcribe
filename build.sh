@@ -20,6 +20,12 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp ".build/release/$EXEC_NAME" "$APP/Contents/MacOS/$EXEC_NAME"
 
+# Bundle brawthumb (Blackmagic RAW audio/thumbnail tool) so proxy-less BRAW
+# clips can still be transcribed (audio read straight from the .braw).
+if [[ -f "tools/brawthumb" ]]; then
+    cp "tools/brawthumb" "$APP/Contents/Resources/brawthumb"
+fi
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
